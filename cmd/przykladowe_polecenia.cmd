@@ -1,0 +1,6 @@
+#define PREDKOSC 100
+#define KAT_OBROTU 90
+
+Move Robot1 PREDKOSC 50
+Rotate Robot1 z KAT_OBROTU 45
+Move Robot2 50 PREDKOSC

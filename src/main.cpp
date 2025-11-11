@@ -1,6 +1,8 @@
 #include <iostream>
 #include <dlfcn.h>
 #include <cassert>
+#include <cstdlib>
+#include <fstream>
 #include "AbstractInterp4Command.hh"
 
 using namespace std;
@@ -68,6 +70,35 @@ int main()
   cout << endl;
   
   delete pCmd;
+
+  cout << endl;
+  cout << "========== Test preprocesora ==========" << endl;
+  cout << endl;
+  
+  const char* input_file = "cmd/przykladowe_polecenia.cmd";
+  const char* output_file = "/tmp/polecenia_po_preprocesorze.cmd";
+  
+  string preproc_cmd = string("cpp -P ") + input_file + " > " + output_file;
+  
+  int ret = system(preproc_cmd.c_str());
+  
+  if (ret != 0) {
+    cerr << "!!! Blad preprocesora" << endl;
+  } else {
+    cout << "Zawartosc pliku po przetworzeniu preprocesora:" << endl;
+    cout << "===============================================" << endl;
+    
+    ifstream file(output_file);
+    string line;
+    while (getline(file, line)) {
+      if (!line.empty()) {
+        cout << line << endl;
+      }
+    }
+    file.close();
+  }
+  
+  cout << endl;
 
   // Zamykanie bibliotek
   dlclose(pLibHnd_Move);
