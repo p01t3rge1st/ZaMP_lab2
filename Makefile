@@ -1,6 +1,10 @@
 __start__: obj __lines_for_space__ interp __plugin__
 	export LD_LIBRARY_PATH="./libs"; ./interp
 
+etap2: obj interp_etap2 __plugin__
+	@echo "Uruchom serwer graficzny, a potem:"
+	@echo "  export LD_LIBRARY_PATH=\"./libs\"; ./interp_etap2"
+
 obj:
 	mkdir obj
 
@@ -22,12 +26,30 @@ LDFLAGS=-Wall
 
 
 
-interp: obj/main.o
-	g++ ${LDFLAGS} -o interp  obj/main.o -ldl
+interp: obj/main.o obj/Cuboid.o obj/Scene.o obj/ComChannel.o obj/XMLReader.o
+	g++ ${LDFLAGS} -o interp obj/main.o obj/Cuboid.o obj/Scene.o obj/ComChannel.o obj/XMLReader.o -ldl
 
 obj/main.o: src/main.cpp inc/AbstractInterp4Command.hh inc/AbstractScene.hh\
-            inc/AbstractComChannel.hh
+            inc/AbstractComChannel.hh inc/Cuboid.hh inc/Scene.hh inc/ComChannel.hh inc/XMLReader.hh
 	g++ -c ${CPPFLAGS} -o obj/main.o src/main.cpp
+
+obj/Cuboid.o: src/Cuboid.cpp inc/Cuboid.hh inc/AbstractMobileObj.hh
+	g++ -c ${CPPFLAGS} -o obj/Cuboid.o src/Cuboid.cpp
+
+obj/Scene.o: src/Scene.cpp inc/Scene.hh inc/AbstractScene.hh
+	g++ -c ${CPPFLAGS} -o obj/Scene.o src/Scene.cpp
+
+obj/ComChannel.o: src/ComChannel.cpp inc/ComChannel.hh inc/AbstractComChannel.hh
+	g++ -c ${CPPFLAGS} -o obj/ComChannel.o src/ComChannel.cpp
+
+obj/XMLReader.o: src/XMLReader.cpp inc/XMLReader.hh
+	g++ -c ${CPPFLAGS} -o obj/XMLReader.o src/XMLReader.cpp
+
+interp_etap2: obj/main_etap2.o obj/Cuboid.o obj/Scene.o obj/ComChannel.o obj/XMLReader.o
+	g++ ${LDFLAGS} -o interp_etap2 obj/main_etap2.o obj/Cuboid.o obj/Scene.o obj/ComChannel.o obj/XMLReader.o
+
+obj/main_etap2.o: src/main_etap2.cpp inc/Scene.hh inc/Cuboid.hh inc/ComChannel.hh inc/XMLReader.hh
+	g++ -c ${CPPFLAGS} -o obj/main_etap2.o src/main_etap2.cpp
 
 doc:
 	cd dox; make
