@@ -43,11 +43,8 @@ class Interp4Move: public AbstractInterp4Command {
   /*!
    * \brief Wyświetla wartości wczytanych parametrów
    */
-  virtual void PrintParams() const override {} 
+  virtual void PrintParams() const override;
 
-  /*!
-   * \brief Wyświetla nazwę polecenia
-   */
   virtual const char* GetCmdName() const override;
 
   /*!

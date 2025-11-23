@@ -37,10 +37,7 @@ Interp4Move::Interp4Move(): _Speed_mmS(0)
  */
 void Interp4Move::PrintCmd() const
 {
-  /*
-   *  Tu trzeba napisać odpowiednio zmodyfikować kod poniżej.
-   */
-  cout << GetCmdName() << " " << _Speed_mmS  << " 10  2" << endl;
+  cout << GetCmdName() << " " << _Speed_mmS  << endl;
 }
 
 
@@ -73,10 +70,10 @@ bool Interp4Move::ExecCmd( AbstractScene      &rScn,
  */
 bool Interp4Move::ReadParams(std::istream& Strm_CmdsList)
 {
-  /*
-   *  Tu trzeba napisać odpowiedni kod.
-   */
-  return true;
+  Strm_CmdsList >> _Speed_mmS;
+  double distance;
+  Strm_CmdsList >> distance;
+  return !Strm_CmdsList.fail();
 }
 
 
@@ -95,4 +92,9 @@ AbstractInterp4Command* Interp4Move::CreateCmd()
 void Interp4Move::PrintSyntax() const
 {
   cout << "   Move  NazwaObiektu  Szybkosc[m/s]  DlugoscDrogi[m]" << endl;
+}
+
+void Interp4Move::PrintParams() const
+{
+  cout << "   Szybkosc: " << _Speed_mmS << " m/s" << endl;
 }
