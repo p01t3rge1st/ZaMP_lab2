@@ -2,13 +2,17 @@
 
 Scene::Scene() {}
 
-Scene::~Scene() {
-    for (auto& pair : _objects) {
-        delete pair.second;
-    }
-}
+
 
 AbstractMobileObj* Scene::FindMobileObj(const char *sName) {
+    auto it = _objects.find(sName);
+    if (it != _objects.end()) {
+        return it->second.get();  
+    }
+    return nullptr;
+}
+
+std::shared_ptr<AbstractMobileObj> Scene::FindMobileObjShared(const char *sName) {
     auto it = _objects.find(sName);
     if (it != _objects.end()) {
         return it->second;
@@ -17,6 +21,13 @@ AbstractMobileObj* Scene::FindMobileObj(const char *sName) {
 }
 
 void Scene::AddMobileObj(AbstractMobileObj *pMobObj) {
+    
+    if (pMobObj) {
+        _objects[pMobObj->GetName()] = std::shared_ptr<AbstractMobileObj>(pMobObj);
+    }
+}
+
+void Scene::AddMobileObjShared(std::shared_ptr<AbstractMobileObj> pMobObj) {
     if (pMobObj) {
         _objects[pMobObj->GetName()] = pMobObj;
     }

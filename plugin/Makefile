@@ -10,6 +10,15 @@ obj:
 CPPFLAGS=-Wall -fPIC -pedantic -std=c++17 -Iinc -I../inc
 LDFLAGS=-Wall -shared
 
+# Build mode (DEBUG=1 adds -g -O0)
+DEBUG ?= 1
+ifeq ($(DEBUG),1)
+CPPFLAGS += -g -O0 -DDEBUG
+LDFLAGS  += -g
+else
+CPPFLAGS += -O2 -DNDEBUG
+endif
+
 __lines_for_space__:
 	@echo
 	@echo

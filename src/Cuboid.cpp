@@ -1,13 +1,13 @@
 #include "Cuboid.hh"
 
 Cuboid::Cuboid() 
-    : _name(""), 
-      _roll_deg(0),
-      _pitch_deg(0),
-      _yaw_deg(0)
+    : priv_name(""), 
+      priv_roll_deg(0),
+      priv_pitch_deg(0),
+      priv_yaw_deg(0)
 {
-    _position_m[0] = 0; _position_m[1] = 0; _position_m[2] = 0;
-    _scale[0] = 1; _scale[1] = 1; _scale[2] = 1;
-    _shift[0] = 0; _shift[1] = 0; _shift[2] = 0;
-    _rgb[0] = 128; _rgb[1] = 128; _rgb[2] = 128;
+    priv_position_m[0] = 0; priv_position_m[1] = 0; priv_position_m[2] = 0;
+    priv_scale[0] = 1; priv_scale[1] = 1; priv_scale[2] = 1;
+    priv_shift[0] = 0; priv_shift[1] = 0; priv_shift[2] = 0;
+    priv_rgb[0] = 128; priv_rgb[1] = 128; priv_rgb[2] = 128;
 }

@@ -1,13 +1,24 @@
 #include <iostream>
 #include <sstream>
+#include <memory>
+#include <dlfcn.h>
 #include "Scene.hh"
 #include "Cuboid.hh"
 #include "ComChannel.hh"
 #include "XMLReader.hh"
+#include "CommandInterpreter.hh"
 
 using namespace std;
 
-string CreateAddObjCmd(Cuboid* pCube) {
+static inline Vector3D V3(const double a[3]) {
+    Vector3D v; v[0]=a[0]; v[1]=a[1]; v[2]=a[2]; return v;
+}
+
+static inline Vector3D V3i(const int a[3]) {
+    Vector3D v; v[0]=static_cast<double>(a[0]); v[1]=static_cast<double>(a[1]); v[2]=static_cast<double>(a[2]); return v;
+}
+
+static string CreateAddObjCmd(Cuboid* pCube) {
     ostringstream oss;
     oss << "AddObj Name=" << pCube->GetName();
     
@@ -29,10 +40,44 @@ string CreateAddObjCmd(Cuboid* pCube) {
     return oss.str();
 }
 
+static bool LoadPlugin(CommandInterpreter& interp, const string& libPath) {
+    void* pLibHnd = dlopen(libPath.c_str(), RTLD_LAZY);
+    if (!pLibHnd) {
+        cerr << "!!! Brak biblioteki: " << libPath << endl;
+        cerr << "    dlerror: " << dlerror() << endl;
+        return false;
+    }
+    
+    void* pFun = dlsym(pLibHnd, "CreateCmd");
+    if (!pFun) {
+        cerr << "!!! Nie znaleziono CreateCmd w " << libPath << endl;
+        return false;
+    }
+    auto pCreateCmd = reinterpret_cast<AbstractInterp4Command* (*)(void)>(pFun);
+    
+    pFun = dlsym(pLibHnd, "GetCmdName");
+    if (!pFun) {
+        cerr << "!!! Nie znaleziono GetCmdName w " << libPath << endl;
+        return false;
+    }
+    auto pGetCmdName = reinterpret_cast<const char* (*)()>(pFun);
+    
+    interp.RegisterCommand(pGetCmdName(), pCreateCmd);
+    cout << "  Zaladowano plugin: " << pGetCmdName() << endl;
+    return true;
+}
+
 int main() {
     Scene scn;
     ComChannel channel;
     XMLReader xmlReader;
+    CommandInterpreter interp;
+    
+    cout << "=== Ladowanie pluginow ===" << endl;
+    if (!LoadPlugin(interp, "libs/libInterp4Move.so")) return 1;
+    if (!LoadPlugin(interp, "libs/libInterp4Rotate.so")) return 1;
+    if (!LoadPlugin(interp, "libs/libInterp4Set.so")) return 1;
+    if (!LoadPlugin(interp, "libs/libInterp4Pause.so")) return 1;
     
     cout << "=== Wczytywanie konfiguracji XML ===" << endl;
     if (!xmlReader.ReadFile("config.xml")) {
@@ -41,32 +86,29 @@ int main() {
     }
     
     cout << "Znaleziono " << xmlReader.cubes.size() << " obiektow" << endl;
+
+    
+
+
     
     for (const auto& xmlCube : xmlReader.cubes) {
-        Cuboid* pCube = new Cuboid();
+        auto pCube = std::make_shared<Cuboid>();
         pCube->SetName(xmlCube.name.c_str());
-        
-        Vector3D scale, shift, trans, rgb;
-        scale[0] = xmlCube.scale[0]; scale[1] = xmlCube.scale[1]; scale[2] = xmlCube.scale[2];
-        shift[0] = xmlCube.shift[0]; shift[1] = xmlCube.shift[1]; shift[2] = xmlCube.shift[2];
-        trans[0] = xmlCube.trans[0]; trans[1] = xmlCube.trans[1]; trans[2] = xmlCube.trans[2];
-        rgb[0] = xmlCube.rgb[0]; rgb[1] = xmlCube.rgb[1]; rgb[2] = xmlCube.rgb[2];
-        
-        pCube->SetScale(scale);
-        pCube->SetShift(shift);
-        pCube->SetPosition_m(trans);
+        pCube->SetScale(V3(xmlCube.scale));
+        pCube->SetShift(V3(xmlCube.shift));
+        pCube->SetPosition_m(V3(xmlCube.trans));
         pCube->SetAng_Roll_deg(xmlCube.rot[0]);
         pCube->SetAng_Pitch_deg(xmlCube.rot[1]);
         pCube->SetAng_Yaw_deg(xmlCube.rot[2]);
-        pCube->SetRGB(rgb);
-        
-        scn.AddMobileObj(pCube);
+        pCube->SetRGB(V3i(xmlCube.rgb));
+
+        scn.AddMobileObjShared(pCube);
         cout << "  Dodano obiekt: " << xmlCube.name << endl;
     }
     
     cout << endl << "=== Laczenie z serwerem ===" << endl;
     if (!channel.Connect("127.0.0.1", 6217)) {
-        cerr << "Blad polaczenia z serwerem (czy serwer jest uruchomiony?)" << endl;
+        cerr << "Zapomniales uruchomic serwer graficzny!" << endl;
         return 1;
     }
     cout << "Polaczono z serwerem!" << endl;
@@ -76,16 +118,22 @@ int main() {
     cout << "Wyslano: Clear" << endl;
     
     for (const auto& xmlCube : xmlReader.cubes) {
-        AbstractMobileObj* pObj = scn.FindMobileObj(xmlCube.name.c_str());
+        auto pObj = scn.FindMobileObjShared(xmlCube.name.c_str());
         if (pObj) {
-            Cuboid* pCube = dynamic_cast<Cuboid*>(pObj);
-            string cmd = CreateAddObjCmd(pCube);
-            channel.Send(cmd);
-            cout << "Wyslano: " << cmd << endl;
+            auto pCube = std::dynamic_pointer_cast<Cuboid>(pObj);
+            if (pCube) {
+                string cmd = CreateAddObjCmd(pCube.get());
+                channel.Send(cmd);
+                cout << "Wyslano: " << cmd << endl;
+            }
         }
     }
+
     
-    cout << endl << "Program zakonczony. Nacisnij Enter aby zamknac..." << endl;
+    cout << endl << "=== Wykonywanie polecen z CMD ===" << endl;
+    interp.ProcessFile(scn, channel, "cmd/przykladowe_polecenia.cmd");
+    
+    cout << endl << "=== Koniec ===" << endl;
     cin.get();
     
     channel.Close();

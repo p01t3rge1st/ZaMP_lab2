@@ -1,0 +1,256 @@
+#include <iostream>
+#include <dlfcn.h>
+#include <cassert>
+#include <cstdlib>
+#include <fstream>
+#include <map>
+#include <string>
+#include <sstream>
+#include "AbstractInterp4Command.hh"
+#include "Scene.hh"
+#include "Cuboid.hh"
+#include "ComChannel.hh"
+#include "XMLReader.hh"
+
+using namespace std;
+
+int main() {
+
+  map<string, AbstractInterp4Command* (*)(void)> cmdMap;
+
+  // Przygotowanie sceny i kanalu komunikacyjnego (Etap 1 z realnym wykonaniem)
+  Scene scn;
+  ComChannel channel;
+  XMLReader xmlReader;
+
+  void * pLibHnd_Move = dlopen("libInterp4Move.so", RTLD_LAZY);
+  AbstractInterp4Command * ( * pCreateCmd_Move)(void);
+  void * pFun;
+
+  if (!pLibHnd_Move) {
+    cerr << "!!! Brak biblioteki: libInterp4Move.so" << endl;
+    return 1;
+  }
+
+  pFun = dlsym(pLibHnd_Move, "CreateCmd");
+  if (!pFun) {
+    cerr << "!!! Nie znaleziono funkcji CreateCmd w libInterp4Move.so" << endl;
+    return 1;
+  }
+  pCreateCmd_Move = reinterpret_cast < AbstractInterp4Command * ( * )(void) > (pFun);
+
+  void * pLibHnd_Rotate = dlopen("libInterp4Rotate.so", RTLD_LAZY);
+  AbstractInterp4Command * ( * pCreateCmd_Rotate)(void);
+
+  if (!pLibHnd_Rotate) {
+    cerr << "!!! Brak biblioteki: libInterp4Rotate.so" << endl;
+    return 1;
+  }
+
+  pFun = dlsym(pLibHnd_Rotate, "CreateCmd");
+  if (!pFun) {
+    cerr << "!!! Nie znaleziono funkcji CreateCmd w libInterp4Rotate.so" << endl;
+    return 1;
+  }
+  pCreateCmd_Rotate = reinterpret_cast < AbstractInterp4Command * ( * )(void) > (pFun);
+
+  void * pLibHnd_Set = dlopen("libInterp4Set.so", RTLD_LAZY);
+  AbstractInterp4Command * ( * pCreateCmd_Set)(void);
+
+  if (!pLibHnd_Set) {
+    cerr << "!!! Brak biblioteki: libInterp4Set.so" << endl;
+    return 1;
+  }
+
+  pFun = dlsym(pLibHnd_Set, "CreateCmd");
+  if (!pFun) {
+    cerr << "!!! Nie znaleziono funkcji CreateCmd w libInterp4Set.so" << endl;
+    return 1;
+  }
+  pCreateCmd_Set = reinterpret_cast < AbstractInterp4Command * ( * )(void) > (pFun);
+
+  void * pLibHnd_Pause = dlopen("libInterp4Pause.so", RTLD_LAZY);
+  AbstractInterp4Command * ( * pCreateCmd_Pause)(void);
+
+  if (!pLibHnd_Pause) {
+    cerr << "!!! Brak biblioteki: libInterp4Pause.so" << endl;
+    return 1;
+  }
+
+  pFun = dlsym(pLibHnd_Pause, "CreateCmd");
+  if (!pFun) {
+    cerr << "!!! Nie znaleziono funkcji CreateCmd w libInterp4Pause.so" << endl;
+    return 1;
+  }
+  pCreateCmd_Pause = reinterpret_cast < AbstractInterp4Command * ( * )(void) > (pFun);
+
+  cmdMap["Move"] = pCreateCmd_Move;
+  cmdMap["Rotate"] = pCreateCmd_Rotate;
+  cmdMap["Set"] = pCreateCmd_Set;
+  cmdMap["Pause"] = pCreateCmd_Pause;
+
+  // --- Wczytaj obiekty z XML i polacz z serwerem, wyslij AddObj ---
+  {
+    cout << "\n=== [Etap1] Inicjalizacja sceny z XML + polaczenie ===\n";
+    if (!xmlReader.ReadFile("config.xml")) {
+      cerr << "!!! Blad wczytywania config.xml (Etap1)" << endl;
+      // Nie przerywamy – mozna nadal testowac Pause itp., ale nie bedzie AddObj
+    } else {
+      for (const auto& xmlCube : xmlReader.cubes) {
+        Cuboid* pCube = new Cuboid();
+        pCube->SetName(xmlCube.name.c_str());
+
+        Vector3D scale, shift, trans, rgb;
+        scale[0] = xmlCube.scale[0]; scale[1] = xmlCube.scale[1]; scale[2] = xmlCube.scale[2];
+        shift[0] = xmlCube.shift[0]; shift[1] = xmlCube.shift[1]; shift[2] = xmlCube.shift[2];
+        trans[0] = xmlCube.trans[0]; trans[1] = xmlCube.trans[1]; trans[2] = xmlCube.trans[2];
+        rgb[0] = xmlCube.rgb[0];     rgb[1] = xmlCube.rgb[1];     rgb[2] = xmlCube.rgb[2];
+
+        pCube->SetScale(scale);
+        pCube->SetShift(shift);
+        pCube->SetPosition_m(trans);
+        pCube->SetAng_Roll_deg(xmlCube.rot[0]);
+        pCube->SetAng_Pitch_deg(xmlCube.rot[1]);
+        pCube->SetAng_Yaw_deg(xmlCube.rot[2]);
+        pCube->SetRGB(rgb);
+        scn.AddMobileObj(pCube);
+      }
+
+      if (!channel.Connect("127.0.0.1", 6217)) {
+        cerr << "!!! Brak polaczenia z serwerem graficznym (Etap1)" << endl;
+      } else {
+        channel.Send("Clear");
+        // Wyślij AddObj dla kazdego obiektu
+        for (const auto& xmlCube : xmlReader.cubes) {
+          AbstractMobileObj* pObj = scn.FindMobileObj(xmlCube.name.c_str());
+          if (!pObj) continue;
+          Cuboid* pCube = dynamic_cast<Cuboid*>(pObj);
+          if (!pCube) continue;
+
+          ostringstream oss;
+          const Vector3D& scale = pCube->GetScale();
+          const Vector3D& shift = pCube->GetShift();
+          const Vector3D& pos   = pCube->GetPositoin_m();
+          const Vector3D& rgbv  = pCube->GetRGB();
+          oss << "AddObj Name=" << pCube->GetName()
+              << " Scale=(" << scale[0] << "," << scale[1] << "," << scale[2] << ")"
+              << " Shift=(" << shift[0] << "," << shift[1] << "," << shift[2] << ")"
+              << " RotXYZ_deg=(" << pCube->GetAng_Roll_deg() << "," << pCube->GetAng_Pitch_deg() << "," << pCube->GetAng_Yaw_deg() << ")"
+              << " Trans_m=(" << pos[0] << "," << pos[1] << "," << pos[2] << ")"
+              << " RGB=(" << (int)rgbv[0] << "," << (int)rgbv[1] << "," << (int)rgbv[2] << ")";
+          channel.Send(oss.str());
+        }
+      }
+    }
+  }
+
+  AbstractInterp4Command * pCmd = pCreateCmd_Move();
+
+  cout << endl;
+  cout << "========== Test polecenia Move ==========" << endl;
+  cout << "Nazwa polecenia: " << pCmd -> GetCmdName() << endl;
+  cout << endl;
+  pCmd -> PrintSyntax();
+  cout << endl;
+  pCmd -> PrintCmd();
+  cout << endl;
+
+  delete pCmd;
+
+  pCmd = pCreateCmd_Rotate();
+
+  cout << endl;
+  cout << "========== Test polecenia Rotate ==========" << endl;
+  cout << "Nazwa polecenia: " << pCmd -> GetCmdName() << endl;
+  cout << endl;
+  pCmd -> PrintSyntax();
+  cout << endl;
+  pCmd -> PrintCmd();
+  cout << endl;
+
+  delete pCmd;
+
+  cout << endl;
+  cout << "========== Test preprocesora ==========" << endl;
+  cout << endl;
+
+  const char * input_file = "cmd/przykladowe_polecenia.cmd";
+  const char * output_file = "/tmp/polecenia_po_preprocesorze.cmd";
+
+  string preproc_cmd = string("cpp -P ") + input_file + " > " + output_file;
+
+  int ret = system(preproc_cmd.c_str());
+
+  if (ret != 0) {
+    cerr << "!!! Blad preprocesora" << endl;
+  } else {
+    cout << "Zawartosc pliku po przetworzeniu preprocesora:" << endl;
+    cout << "===============================================" << endl;
+
+    ifstream file(output_file);
+    string line;
+    while (getline(file, line)) {
+      if (!line.empty()) {
+        cout << line << endl;
+      }
+    }
+    file.close();
+  }
+
+  cout << endl;
+  cout << "========== Wykonywanie polecen z pliku ==========" << endl;
+  cout << endl;
+
+  ifstream cmdFile(output_file);
+  string cmdName;
+  string objectName;
+
+  while (cmdFile >> cmdName) {
+    if (cmdMap.find(cmdName) == cmdMap.end()) {
+      cerr << "Nieznane polecenie: " << cmdName << endl;
+      string line;
+      getline(cmdFile, line);
+      continue;
+    }
+
+    pCmd = cmdMap[cmdName]();
+
+    if (cmdName == "Pause") {
+      if (!pCmd->ReadParams(cmdFile)) {
+        cerr << "Blad wczytywania parametrow dla: " << cmdName << endl;
+        delete pCmd;
+        continue;
+      }
+      cout << "Polecenie: " << cmdName << endl;
+      pCmd->PrintParams();
+      cout << endl;
+
+      // Uruchomienie komendy na scenie (Pause nie potrzebuje nazwy obiektu)
+      pCmd->ExecCmd(scn, "", channel);
+    } else {
+      cmdFile >> objectName;
+      
+      if (!pCmd->ReadParams(cmdFile)) {
+        cerr << "Blad wczytywania parametrow dla: " << cmdName << endl;
+        delete pCmd;
+        continue;
+      }
+
+      cout << "Polecenie: " << cmdName << " dla obiektu: " << objectName << endl;
+      pCmd->PrintParams();
+      cout << endl;
+
+      // Uruchomienie komendy na scenie i wysylka UpdateObj przez kanal
+      pCmd->ExecCmd(scn, objectName.c_str(), channel);
+    }
+
+    delete pCmd;
+  }
+
+  cmdFile.close();
+
+  dlclose(pLibHnd_Move);
+  dlclose(pLibHnd_Rotate);
+  dlclose(pLibHnd_Set);
+  dlclose(pLibHnd_Pause);
+}

@@ -6,7 +6,12 @@
 #include <map>
 #include <string>
 #include <sstream>
+#include <memory>
 #include "AbstractInterp4Command.hh"
+#include "Scene.hh"
+#include "Cuboid.hh"
+#include "ComChannel.hh"
+#include "XMLReader.hh"
 
 using namespace std;
 
@@ -14,7 +19,12 @@ int main() {
 
   map<string, AbstractInterp4Command* (*)(void)> cmdMap;
 
-  void * pLibHnd_Move = dlopen("libInterp4Move.so", RTLD_LAZY);
+  
+  Scene scn;
+  ComChannel channel;
+  XMLReader xmlReader;
+
+  void * pLibHnd_Move = dlopen("./libs/libInterp4Move.so", RTLD_LAZY);
   AbstractInterp4Command * ( * pCreateCmd_Move)(void);
   void * pFun;
 
@@ -30,7 +40,7 @@ int main() {
   }
   pCreateCmd_Move = reinterpret_cast < AbstractInterp4Command * ( * )(void) > (pFun);
 
-  void * pLibHnd_Rotate = dlopen("libInterp4Rotate.so", RTLD_LAZY);
+  void * pLibHnd_Rotate = dlopen("./libs/libInterp4Rotate.so", RTLD_LAZY);
   AbstractInterp4Command * ( * pCreateCmd_Rotate)(void);
 
   if (!pLibHnd_Rotate) {
@@ -45,7 +55,7 @@ int main() {
   }
   pCreateCmd_Rotate = reinterpret_cast < AbstractInterp4Command * ( * )(void) > (pFun);
 
-  void * pLibHnd_Set = dlopen("libInterp4Set.so", RTLD_LAZY);
+  void * pLibHnd_Set = dlopen("./libs/libInterp4Set.so", RTLD_LAZY);
   AbstractInterp4Command * ( * pCreateCmd_Set)(void);
 
   if (!pLibHnd_Set) {
@@ -60,7 +70,7 @@ int main() {
   }
   pCreateCmd_Set = reinterpret_cast < AbstractInterp4Command * ( * )(void) > (pFun);
 
-  void * pLibHnd_Pause = dlopen("libInterp4Pause.so", RTLD_LAZY);
+  void * pLibHnd_Pause = dlopen("./libs/libInterp4Pause.so", RTLD_LAZY);
   AbstractInterp4Command * ( * pCreateCmd_Pause)(void);
 
   if (!pLibHnd_Pause) {
@@ -79,6 +89,61 @@ int main() {
   cmdMap["Rotate"] = pCreateCmd_Rotate;
   cmdMap["Set"] = pCreateCmd_Set;
   cmdMap["Pause"] = pCreateCmd_Pause;
+
+  
+  {
+    cout << "\n=== [Etap1] Inicjalizacja sceny z XML + polaczenie ===\n";
+    if (!xmlReader.ReadFile("config.xml")) {
+      cerr << "!!! Blad wczytywania config.xml (Etap1)" << endl;
+      
+    } else {
+      for (const auto& xmlCube : xmlReader.cubes) {
+        auto pCube = std::make_shared<Cuboid>();
+        pCube->SetName(xmlCube.name.c_str());
+
+        Vector3D scale, shift, trans, rgb;
+        scale[0] = xmlCube.scale[0]; scale[1] = xmlCube.scale[1]; scale[2] = xmlCube.scale[2];
+        shift[0] = xmlCube.shift[0]; shift[1] = xmlCube.shift[1]; shift[2] = xmlCube.shift[2];
+        trans[0] = xmlCube.trans[0]; trans[1] = xmlCube.trans[1]; trans[2] = xmlCube.trans[2];
+        rgb[0] = xmlCube.rgb[0];     rgb[1] = xmlCube.rgb[1];     rgb[2] = xmlCube.rgb[2];
+
+        pCube->SetScale(scale);
+        pCube->SetShift(shift);
+        pCube->SetPosition_m(trans);
+        pCube->SetAng_Roll_deg(xmlCube.rot[0]);
+        pCube->SetAng_Pitch_deg(xmlCube.rot[1]);
+        pCube->SetAng_Yaw_deg(xmlCube.rot[2]);
+        pCube->SetRGB(rgb);
+        scn.AddMobileObjShared(pCube);
+      }
+
+      if (!channel.Connect("127.0.0.1", 6217)) {
+        cerr << "!!! Brak polaczenia z serwerem graficznym (Etap1)" << endl;
+      } else {
+        channel.Send("Clear");
+        
+        for (const auto& xmlCube : xmlReader.cubes) {
+          auto pObj = scn.FindMobileObjShared(xmlCube.name.c_str());
+          if (!pObj) continue;
+          auto pCube = std::dynamic_pointer_cast<Cuboid>(pObj);
+          if (!pCube) continue;
+
+          ostringstream oss;
+          const Vector3D& scale = pCube->GetScale();
+          const Vector3D& shift = pCube->GetShift();
+          const Vector3D& pos   = pCube->GetPositoin_m();
+          const Vector3D& rgbv  = pCube->GetRGB();
+          oss << "AddObj Name=" << pCube->GetName()
+              << " Scale=(" << scale[0] << "," << scale[1] << "," << scale[2] << ")"
+              << " Shift=(" << shift[0] << "," << shift[1] << "," << shift[2] << ")"
+              << " RotXYZ_deg=(" << pCube->GetAng_Roll_deg() << "," << pCube->GetAng_Pitch_deg() << "," << pCube->GetAng_Yaw_deg() << ")"
+              << " Trans_m=(" << pos[0] << "," << pos[1] << "," << pos[2] << ")"
+              << " RGB=(" << (int)rgbv[0] << "," << (int)rgbv[1] << "," << (int)rgbv[2] << ")";
+          channel.Send(oss.str());
+        }
+      }
+    }
+  }
 
   AbstractInterp4Command * pCmd = pCreateCmd_Move();
 
@@ -160,6 +225,9 @@ int main() {
       cout << "Polecenie: " << cmdName << endl;
       pCmd->PrintParams();
       cout << endl;
+
+      
+      pCmd->ExecCmd(scn, "", channel);
     } else {
       cmdFile >> objectName;
       
@@ -172,6 +240,9 @@ int main() {
       cout << "Polecenie: " << cmdName << " dla obiektu: " << objectName << endl;
       pCmd->PrintParams();
       cout << endl;
+
+      
+      pCmd->ExecCmd(scn, objectName.c_str(), channel);
     }
 
     delete pCmd;

@@ -1,0 +1,598 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[polish]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{courier}
+\geometry{margin=2cm}
+\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue}
+\lstset{basicstyle=\small\ttfamily, frame=single, showstringspaces=false, columns=flexible}
+
+\title{Prosty opis działania programu: Interpreter poleceń robota + wizualizacja 3D}
+\author{Student}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Wstęp}
+Ten dokument tłumaczy krok po kroku jak działa cały napisany program. Ma być zrozumiały nawet dla osoby totalnie początkującej. Pominę szczegóły bibliotek dostarczonych przez prowadzącego (Qt, QGLViewer), wspomnę tylko tam gdzie są używane. \textbf{Cel}: wczytać plik z poleceniami dla robota, przetworzyć makra (\#define), wczytać konfigurację sceny z pliku XML, połączyć się z serwerem graficznym i wysłać do niego obiekty, a później wykonywać komendy z pluginów.
+
+\section{Ogólny obraz w 7 prostych punktach}
+\begin{enumerate}
+  \item \textbf{Start programu}: uruchamiamy nasz exe (np. \texttt{./interp\_etap2}).
+  \item \textbf{Konfiguracja XML}: wczytujemy plik \texttt{config.xml} i tworzymy obiekty w scenie.
+  \item \textbf{Połączenie z serwerem}: otwieramy gniazdo TCP na \texttt{127.0.0.1:6217}.
+  \item \textbf{Wyczyszczenie sceny}: wysyłamy tekst \texttt{Clear} do serwera.
+  \item \textbf{Dodanie obiektów}: dla każdego obiektu wysyłamy polecenie \texttt{AddObj ...}.
+  \item \textbf{(Etap 1) Wczytanie i rozwinięcie pliku komend}: preprocesor \texttt{cpp -P} rozwija \#define; potem czytamy komendy i przez mapę tworzymy odpowiednie pluginy.
+  \item \textbf{Wykonywanie komend}: pluginy (np. Move) będą później wysyłały \texttt{UpdateObj ...} aby animować.
+\end{enumerate}
+
+\section{Kompilacja i struktura katalogów}
+Główne katalogi:
+\begin{itemize}
+  \item \texttt{inc/}: nagłówki (klasy abstrakcyjne, \texttt{Cuboid.hh}, \texttt{Scene.hh}, \texttt{ComChannel.hh}, \texttt{XMLReader.hh}).
+  \item \texttt{src/}: implementacje klas + \texttt{main.cpp} (Etap 1) oraz \texttt{main\_etap2.cpp} (Etap 2).
+  \item \texttt{plugin/}: kod źródłowy pluginów (Move, Rotate, Set, Pause) i ich Makefile do budowy bibliotek \texttt{.so}.
+  \item \texttt{libs/}: tu lądują zbudowane biblioteki pluginów (\texttt{libInterp4Move.so} itd.).
+  \item \texttt{files/serwer-bez-tla-Qt6-cmake/}: źródła serwera graficznego.
+\end{itemize}
+Główny \texttt{Makefile} buduje: \texttt{interp} (Etap 1) oraz \texttt{interp\_etap2} (Etap 2). Pluginy są budowane jako biblioteki współdzielone z \texttt{-fPIC -shared}.
+
+\section{Preprocesor i plik poleceń}
+\subsection{Dlaczego używamy preprocesora?}
+Aby móc mieć w pliku z komendami definicje typu:
+\begin{lstlisting}[language=C]
+#define PREDKOSC 100
+#define KAT_OBROTU 90
+#define CZAS_PAUZY 500
+Move PREDKOSC 2
+Rotate Z KAT_OBROTU 30
+Pause CZAS_PAUZY
+\end{lstlisting}
+Gdy uruchamiamy \texttt{cpp -P przykladowe\_polecenia.cmd > wynik.txt}, makra są rozwijane i w programie wczytujemy już liczby (100, 90, 500).
+
+\subsection{Czy musimy używać getline?}
+Nie. Do prostych komend wystarczy \texttt{operator>>} na strumieniu (\texttt{ifstream}). Gdyby linie były bardziej złożone lub trzeba by ignorować końcówkę po komentarzu, wtedy \texttt{std::getline} i następnie parsowanie przez \texttt{std::istringstream} byłoby wygodne.
+
+\section{System pluginów (dynamiczne komendy)}
+\subsection{Idea}
+Nie chcemy kompilować na sztywno wszystkich komend w głównym programie. Każda komenda (Move, Rotate, Set, Pause) jest w osobnej bibliotece \texttt{.so}.\newline
+\textbf{Dlaczego?} Można dodać nową komendę bez zmiany kodu głównego – wystarczy dorzucić nową bibliotekę.
+
+\subsection{Jak wygląda plugin?}
+Przykładowo \texttt{Interp4Move} ma funkcję:
+\begin{lstlisting}[language=C++]
+extern "C" {
+  AbstractInterp4Command* CreateCmd();
+  const char* GetCmdName();
+}
+\end{lstlisting}
+\texttt{extern "C"} usuwa zniekształcenie nazw (mangling), żeby \texttt{dlsym} mogło znaleźć te symbole po prostych nazwach.
+
+\subsection{Ładowanie pluginów}
+Fragment w głównym programie (Etap 1) robi:
+\begin{enumerate}
+  \item \texttt{dlopen("libs/libInterp4Move.so", RTLD\_LATE)} – otwiera bibliotekę.
+  \item \texttt{dlsym(handle, "CreateCmd")} – pobiera wskaźnik do funkcji tworzącej obiekt komendy.
+  \item \texttt{dlsym(handle, "GetCmdName")} – pobiera nazwę komendy (np. "Move").
+  \item Wstawia do mapy: klucz = nazwa, wartość = wskaźnik do \texttt{CreateCmd}.
+\end{enumerate}
+
+\section{Mapy i po co one są}
+Wykorzystujemy dwie \texttt{std::map}:
+\begin{itemize}
+  \item \textbf{Mapa komend} – \texttt{map<string, CreateCmd\_function*>}. Po odczytaniu słowa z pliku (np. "Move") szukamy w mapie i wołamy odpowiednią fabrykę. Bez \texttt{if/else} lub ogromnego \texttt{switch}.
+  \item \textbf{Mapa obiektów sceny} – w klasie \texttt{Scene}: \texttt{map<string, AbstractMobileObj*>}. Klucz = nazwa obiektu ("Podstawa"), wartość = wskaźnik na prostopadłościan (\texttt{Cuboid}). Pozwala szybko znaleźć obiekt gdy będziemy go aktualizować (UpdateObj).
+\end{itemize}
+\textbf{Zaleta}: szybkie wyszukiwanie i prosty sposób dodawania nowych elementów. Każda nazwa jest unikalna.
+
+\section{Plik XML konfiguracji sceny}
+\subsection{Co tam jest?}
+Plik \texttt{config.xml} zawiera listę bibliotek pluginów oraz opis obiektów typu \texttt{Cube} z atrybutami: \texttt{Name}, \texttt{Scale}, \texttt{Shift}, \texttt{RotXYZ\_deg}, \texttt{Trans\_m}, \texttt{RGB}.
+\subsection{Jak czytamy?}
+Napisaliśmy prosty \textbf{XMLReader} który:
+\begin{enumerate}
+  \item Wczytuje plik do jednego łańcucha.
+  \item Szuka fragmentów \texttt{<Cube .../>}.
+  \item Odczytuje wartości atrybutów (proste wycinanie tekstu między \texttt{Nazwą="..."}).
+  \item Tworzy dla każdego wpisu strukturę (np. \texttt{XMLCube}) i zwraca listę.
+\end{enumerate}
+\subsection{Tworzenie obiektów sceny}
+Każdy \texttt{XMLCube} zamieniamy na \texttt{Cuboid}. Ustawiamy jego skalę, przesunięcia, kolory itd. i dodajemy do \texttt{Scene}.
+
+\section{Klasa Cuboid}
+\subsection{Co reprezentuje?}
+To jedna bryła (prostopadłościan) w scenie. Ma: pozycję, skalę (rozmiar w X,Y,Z), przesunięcie (shift), rotacje (Roll, Pitch, Yaw w stopniach), translację, kolor (RGB). Proste tablice / wektory trzech liczb.
+\subsection{Dlaczego takie pola?}
+Serwer graficzny potrzebuje kompletu parametrów żeby poprawnie narysować kształt i móc go później zmieniać (animacja).
+
+\section{Klasa Scene}
+\subsection{Rola}
+Trzyma wszystkie obiekty. Pozwala dodać nowy oraz znaleźć istniejący po nazwie. Destruktor usuwa obiekty aby nie było wycieku pamięci.
+\subsection{Działanie dodawania}
+Kiedy wczytamy XML i stworzymy \texttt{Cuboid*}, wołamy \texttt{Scene.AddMobileObj(ptr)} – obiekt ląduje w mapie.
+
+\section{Kanał komunikacyjny (ComChannel)}
+\subsection{Po co?}
+Aby wysłać tekstowe polecenia do serwera graficznego.
+\subsection{Jak?}
+\begin{enumerate}
+  \item \texttt{socket()} – tworzymy gniazdo.
+  \item Ustawiamy adres: \texttt{127.0.0.1}, port \texttt{6217}.
+  \item \texttt{connect()} – łączymy się.
+  \item \texttt{send()} – wysyłamy polecenia jako zwykłe linie tekstu zakończone \texttt{\n}.
+  \item \texttt{Close()} – wysyłamy "Close" i zamykamy gniazdo.
+\end{enumerate}
+\subsection{Format poleceń do serwera}
+\begin{lstlisting}
+Clear
+AddObj Name=Podstawa Scale=(0.7,0.7,0.2) Shift=(0,-0.5,0) RotXYZ_deg=(0,0,0) Trans_m=(0,0,0) RGB=(0,0,255)
+AddObj Name=Podstawa.Ramie1 Scale=(0.1,0.1,0.6) Shift=(0,-0.5,0) RotXYZ_deg=(0,0,0) Trans_m=(0,0.7,0) RGB=(255,0,0)
+UpdateObj Name=Podstawa.Ramie1 Trans_m=(0,1.0,0)
+Close
+\end{lstlisting}
+\texttt{UpdateObj} będzie używane przez pluginy ruchu (animacja).
+
+\section{Przepływ programu (Etap 2)}
+\begin{enumerate}
+  \item Start \texttt{main\_etap2.cpp}.
+  \item Wczytaj XML → lista obiektów → utwórz \texttt{Scene}.
+  \item Połącz z serwerem (\texttt{ComChannel.Connect}).
+  \item Wyślij \texttt{Clear}.
+  \item Dla każdego obiektu: zbuduj linię \texttt{AddObj ...} i wyślij.
+  \item (Później) Wczytaj plik komend – użyj mapy komend → wykonuj pluginy.
+  \item Zakończ → \texttt{Close}.
+\end{enumerate}
+
+\section{Dodanie nowego pluginu (przykład)}
+\begin{enumerate}
+  \item Stwórz pliki \texttt{plugin/inc/Interp4Foo.hh} i \texttt{plugin/src/Interp4Foo.cpp}.
+  \item Zaimplementuj klasę dziedziczącą po \texttt{AbstractInterp4Command} (metody: \texttt{ReadParams}, \texttt{PrintCmd}, \texttt{ExecCmd}).
+  \item Dodaj \texttt{extern "C" CreateCmd()} i \texttt{GetCmdName()} zwracające np. \texttt{"Foo"}.
+  \item Dodaj regułę w \texttt{plugin/Makefile} aby zbudować \texttt{libInterp4Foo.so}.
+  \item Uruchom główny program – \texttt{dlopen} załaduje bibliotekę – komenda \texttt{Foo ...} będzie rozpoznana.\end{enumerate}
+
+\section{Dlaczego takie rozwiązania?}
+\begin{itemize}
+  \item \textbf{Pluginy}: elastyczność i brak rekompilacji całości.
+  \item \textbf{Mapy}: szybkie odwzorowanie nazwy na działanie/obiekt.
+  \item \textbf{Preprocesor}: proste makra – nie trzeba pisać własnych parserów dla definicji.
+  \item \textbf{XML}: zapis strukturalny obiektów sceny – łatwo rozszerzyć filarami, ramionami itd.
+  \item \textbf{Tekstowy protokół}: łatwe debugowanie – można zobaczyć jakie dokładnie linie lecą do serwera.
+\end{itemize}
+
+\section{Auto czy jawne typy?}
+Użycie \texttt{auto} jest ograniczone do miejsc gdzie typ jest długi (iteratory map). Przy prostych typach (\texttt{int}, \texttt{double}) jawne nazwy są czytelniejsze dla początkującego.
+
+\section{Typowe problemy i ich naprawa}
+\begin{itemize}
+  \item \textbf{Brak konstruktorów wektorów} – \texttt{Vector3D} trzeba wypełniać przez indeksy \texttt{v[0] = ...}.
+  \item \textbf{Nieudane \texttt{dlopen}} – sprawdzić \texttt{LD\_LIBRARY\_PATH} i nazwę pliku \texttt{.so}.
+  \item \textbf{Brak połączenia z serwerem} – upewnić się że serwer działa i nasłuchuje na porcie \texttt{6217}.
+  \item \textbf{Błędy w XML} – zła nazwa atrybutu powoduje brak obiektu; dodać sprawdzanie pustych wartości.
+\end{itemize}
+
+\section{Jak debugować krok po kroku}
+\begin{enumerate}
+  \item Po uruchomieniu: wypisz liczbę wczytanych obiektów z XML.
+  \item Sprawdź komunikat \texttt{"Polaczono z serwerem!"} – jeśli go nie ma, problem z gniazdem.
+  \item Wypisz każdą wysłaną linię (już robimy) – jeśli wygląda źle, popraw składnię.
+  \item Dodaj tymczasowo \texttt{PrintParams()} w pluginach aby widzieć co przeczytały.
+\end{enumerate}
+
+\section{Szczegółowy opis plików – jak dla idioty}
+
+\subsection{Pluginy – wtyczki z komendami}
+
+\subsubsection{Interp4Move.hh i Interp4Move.cpp}
+\textbf{Co to robi:} Komenda "Move" – robot jedzie do przodu.
+
+\textbf{Pola klasy (Interp4Move.hh):}
+\begin{itemize}
+  \item \texttt{\_Speed\_mmS} – szybkość w metrach na sekundę (jedna liczba).
+  \item Brakuje pola "odległość" w nagłówku, ale w ReadParams czytamy dwa doublee (szybkość i dystans). Tylko szybkość jest w klasie – to uproszczenie.
+\end{itemize}
+
+\textbf{Metody:}
+\begin{itemize}
+  \item \texttt{GetCmdName()} – zwraca "Move" (nazwa komendy).
+  \item \texttt{ReadParams(istream\&)} – wczytuje z pliku: pierwszą liczbę do \texttt{\_Speed\_mmS}, drugą do zmiennej lokalnej \texttt{distance}. Zwraca false jeśli stream ma błąd.
+  \item \texttt{PrintCmd()} – wypisuje nazwę i wartość szybkości na ekran.
+  \item \texttt{PrintSyntax()} – pokazuje jak pisać komendę w pliku.
+  \item \texttt{PrintParams()} – wypisuje "Szybkosc: X m/s".
+  \item \texttt{ExecCmd(...)} – ma wykonać ruch, ale tu jest puste (return true). Jak będzie UpdateObj, tu trzeba wysłać zmienioną pozycję do serwera.
+  \item \texttt{CreateCmd()} – tworzy nowy obiekt Interp4Move przez \texttt{new} i zwraca wskaźnik.
+\end{itemize}
+
+\textbf{Funkcje extern "C" (Interp4Move.cpp):}
+\begin{itemize}
+  \item \texttt{CreateCmd()} – globalna funkcja bez manglingu (dlatego extern "C"). Wołana przez dlsym. Zwraca obiekt Interp4Move.
+  \item \texttt{GetCmdName()} – zwraca "Move".
+\end{itemize}
+
+\textbf{Dlaczego extern "C"?} Żeby nazwa funkcji w .so była prosta ("CreateCmd"), a nie zmieniona przez kompilator. Wtedy dlsym ją znajdzie.
+
+\textbf{Pytania prowadzącego i odpowiedzi:}
+\begin{itemize}
+  \item \textit{Gdzie przechowujesz parametry?} W polu \texttt{\_Speed\_mmS}, dystans w przykładzie tylko odczytywany (nie zachowany).
+  \item \textit{Jak działa ReadParams?} Czyta operator>> dwa double z strumienia.
+  \item \textit{Co robi ExecCmd?} Szkielet, zwraca true. Docelowo: zmieniamy pozycję w scenie i wysyłamy UpdateObj.
+  \item \textit{Czemu dwa CreateCmd (metoda i funkcja)?} Funkcja globalna (extern C) wywołuje metodę statyczną. Wygoda.
+\end{itemize}
+
+\subsubsection{Interp4Rotate.hh i Interp4Rotate.cpp}
+\textbf{Co to robi:} Komenda "Rotate" – obróć obiekt wokół osi.
+
+\textbf{Pola klasy:}
+\begin{itemize}
+  \item \texttt{\_Axis} (char) – oś obrotu: 'x', 'y', lub 'z'.
+  \item \texttt{\_Angle\_deg} (double) – kąt obrotu w stopniach.
+  \item \texttt{\_AngSpeed\_degS} (double) – prędkość kątowa (stopnie na sekundę).
+\end{itemize}
+
+\textbf{Metody:} Takie same jak Move (GetCmdName, ReadParams, PrintCmd, PrintSyntax, PrintParams, ExecCmd, CreateCmd).
+
+\textbf{ReadParams:} Czyta znak (oś), potem dwa double (kąt i prędkość).
+
+\textbf{PrintParams:} Wypisuje oś, kąt i prędkość.
+
+\textbf{ExecCmd:} Puste (return true). Docelowo: zmienia Roll/Pitch/Yaw w Cuboid i wysyła UpdateObj.
+
+\textbf{Pytania:}
+\begin{itemize}
+  \item \textit{Dlaczego char dla osi?} Bo wystarczy jeden znak ('x','y','z').
+  \item \textit{Jak oś się mapuje na Roll/Pitch/Yaw?} 'x' → Roll, 'y' → Pitch, 'z' → Yaw (standardowa konwencja RPY).
+\end{itemize}
+
+\subsubsection{Interp4Set.hh i Interp4Set.cpp}
+\textbf{Co to robi:} Komenda "Set" – ustaw kąt bezwzględny dla osi (nie dodaj, tylko ustaw wartość).
+
+\textbf{Pola:} \texttt{\_Axis} i \texttt{\_Angle\_deg} (bez prędkości).
+
+\textbf{ReadParams:} Czyta znak i double.
+
+\textbf{ExecCmd:} Ustawia bezpośrednio wartość kąta (SetAng\_Roll\_deg itp.), potem wysyła UpdateObj.
+
+\textbf{Różnica Set vs Rotate:} Rotate dodaje obrót (inkrementacja), Set ustawia konkretną wartość.
+
+\subsubsection{Interp4Pause.hh i Interp4Pause.cpp}
+\textbf{Co to robi:} Komenda "Pause" – czekaj określony czas.
+
+\textbf{Pola:} \texttt{\_Duration\_ms} (int) – ile milisekund czekać.
+
+\textbf{ReadParams:} Czyta jedną liczbę całkowitą.
+
+\textbf{ExecCmd:} Wywołuje \texttt{std::this\_thread::sleep\_for} albo po prostu zwraca true. Nie zmienia sceny.
+
+\textbf{Pytania:} \textit{Po co Pause?} Żeby animacja miała przerwy między ruchami (efekt "robot myśli").
+
+\subsection{Główne programy}
+
+\subsubsection{main.cpp (Etap 1)}
+\textbf{Co to robi:} Wczytuje pluginy, rozwija makra preprocesorem, czyta plik komend, wywołuje pluginy.
+
+\textbf{Kroki w kodzie:}
+\begin{enumerate}
+  \item \textbf{Mapa komend:} \texttt{map<string, CreateCmd\_function*> cmdMap;} – słownik nazwa → wskaźnik do funkcji tworzącej obiekt.
+  \item \textbf{dlopen dla każdego pluginu:}
+    \begin{itemize}
+      \item \texttt{dlopen("libInterp4Move.so", RTLD\_LAZY)} – otwiera bibliotekę.
+      \item \texttt{dlsym(handle, "CreateCmd")} – pobiera adres funkcji CreateCmd.
+      \item Rzutowanie na \texttt{AbstractInterp4Command* (*)(void)} – wskaźnik do funkcji zwracającej wskaźnik na obiekt.
+      \item \texttt{cmdMap["Move"] = pCreateCmd\_Move;} – wpis do mapy.
+    \end{itemize}
+  \item Dla Move, Rotate, Set, Pause analogicznie.
+  \item \textbf{Test pluginu:} Tworzy obiekt Move, woła PrintCmd, PrintSyntax, potem delete.
+  \item \textbf{Preprocesor:}
+    \begin{itemize}
+      \item \texttt{system("cpp -P cmd/przykladowe\_polecenia.cmd > /tmp/polecenia\_po\_preprocesorze.cmd")} – uruchamia cpp, który rozwija \#define.
+      \item Wynik zapisany w /tmp. Czytamy ten plik.
+    \end{itemize}
+  \item \textbf{Pętla wykonywania:}
+    \begin{itemize}
+      \item \texttt{while (cmdFile >> cmdName)} – czyta kolejne słowa.
+      \item Sprawdza czy \texttt{cmdMap.find(cmdName) != cmdMap.end()} – czy komenda istnieje.
+      \item \texttt{pCmd = cmdMap[cmdName]();} – tworzy obiekt polecenia przez fabrykę.
+      \item Dla Pause: od razu ReadParams. Dla innych: najpierw nazwa obiektu, potem ReadParams.
+      \item \texttt{pCmd->PrintParams()} – wyświetla parametry.
+      \item \texttt{delete pCmd;} – usuwa obiekt.
+    \end{itemize}
+  \item \textbf{Zamknięcie:} \texttt{dlclose} dla każdej biblioteki.
+\end{enumerate}
+
+\textbf{Pytania:}
+\begin{itemize}
+  \item \textit{Dlaczego mapa a nie if/else?} Łatwo dodać nową komendę bez zmiany kodu – wystarczy kolejny wpis w mapie.
+  \item \textit{Dlaczego preprocesor?} Bo w pliku komend można pisać \texttt{\#define PREDKOSC 100} i używać PREDKOSC zamiast liczby – wygodne.
+  \item \textit{Co to RTLD\_LAZY?} Tryb ładowania: funkcje w bibliotece są wiązane (resolve) dopiero przy pierwszym użyciu, nie od razu.
+  \item \textit{Czemu reinterpret\_cast?} dlsym zwraca void*, trzeba rzutować na konkretny typ funkcji.
+  \item \textit{Gdzie wykonanie ruchu?} ExecCmd w pluginach (na razie puste). Docelowo zmieniamy obiekt w scenie i wysyłamy UpdateObj.
+\end{itemize}
+
+\subsubsection{main\_etap2.cpp (Etap 2)}
+\textbf{Co to robi:} Wczytuje XML z obiektami, tworzy scenę, łączy z serwerem, wysyła AddObj dla każdego obiektu.
+
+\textbf{Kroki:}
+\begin{enumerate}
+  \item \textbf{Inicjalizacja:} Tworzy \texttt{Scene scn;}, \texttt{ComChannel channel;}, \texttt{XMLReader xmlReader;}.
+  \item \textbf{Wczytanie XML:} \texttt{xmlReader.ReadFile("config.xml")} – parsuje plik, wypełnia listę \texttt{xmlReader.cubes}.
+  \item \textbf{Tworzenie obiektów:}
+    \begin{itemize}
+      \item Dla każdego \texttt{xmlCube} w \texttt{xmlReader.cubes}:
+      \item \texttt{new Cuboid()} – tworzy pusty obiekt.
+      \item \texttt{pCube->SetName(xmlCube.name.c\_str())} – ustawia nazwę.
+      \item Przepisanie tablic: \texttt{scale[0] = xmlCube.scale[0]} itd. – bo Vector3D nie ma konstruktora z trzema liczbami.
+      \item \texttt{pCube->SetScale(scale)} itd. – ustawienie wszystkich parametrów.
+      \item \texttt{scn.AddMobileObj(pCube)} – dodanie do sceny (mapa nazwa → wskaźnik).
+    \end{itemize}
+  \item \textbf{Połączenie z serwerem:} \texttt{channel.Connect("127.0.0.1", 6217)} – socket TCP.
+  \item \textbf{Clear:} \texttt{channel.Send("Clear")} – usuwa wszystko ze sceny serwera.
+  \item \textbf{Dodanie obiektów:}
+    \begin{itemize}
+      \item Dla każdego \texttt{xmlCube}:
+      \item \texttt{scn.FindMobileObj(xmlCube.name.c\_str())} – znajdź obiekt w scenie.
+      \item \texttt{dynamic\_cast<Cuboid*>(pObj)} – rzutowanie na konkretny typ.
+      \item \texttt{CreateAddObjCmd(pCube)} – generuje linię tekstu "AddObj Name=X Scale=(...) ...".
+      \item \texttt{channel.Send(cmd)} – wysyła do serwera.
+    \end{itemize}
+  \item \textbf{Czekanie:} \texttt{cin.get()} – program zatrzymany, możesz obejrzeć scenę w oknie serwera.
+  \item \textbf{Zamknięcie:} \texttt{channel.Close()} – wysyła "Close" i zamyka gniazdo.
+\end{enumerate}
+
+\textbf{Funkcja CreateAddObjCmd:}
+\begin{itemize}
+  \item \texttt{ostringstream oss} – buduje string przez <<.
+  \item \texttt{oss << "AddObj Name=" << pCube->GetName();} – początek.
+  \item Kolejno doklejamy: Scale=(x,y,z), Shift=(x,y,z), RotXYZ\_deg=(r,p,y), Trans\_m=(x,y,z), RGB=(r,g,b).
+  \item \texttt{return oss.str();} – gotowa linia.
+\end{itemize}
+
+\textbf{Pytania:}
+\begin{itemize}
+  \item \textit{Dlaczego dynamic\_cast?} Bo mapa trzyma AbstractMobileObj*, a chcemy dostać Cuboid* żeby wywołać GetScale itd.
+  \item \textit{Czemu przepisujemy tablice ręcznie?} Bo Vector3D nie ma konstruktora. Można by zrobić pętlę \texttt{for(int i=0;i<3;++i)}.
+  \item \textit{Co jeśli serwer nie działa?} Connect zwróci false, program wypisuje błąd i kończy.
+  \item \textit{Gdzie UpdateObj?} Jeszcze nie ma – docelowo w ExecCmd pluginów (Move, Rotate).
+\end{itemize}
+
+\subsection{Klasy obiektów i sceny}
+
+\subsubsection{Cuboid.hh i Cuboid.cpp}
+\textbf{Co to jest:} Prostopadłościan (kostka 3D) w scenie.
+
+\textbf{Pola prywatne:}
+\begin{itemize}
+  \item \texttt{priv\_name} (string) – nazwa obiektu.
+  \item \texttt{priv\_position\_m} (Vector3D) – pozycja w metrach (x,y,z).
+  \item \texttt{priv\_scale} (Vector3D) – rozmiar w trzech osiach (skalowanie).
+  \item \texttt{priv\_shift} (Vector3D) – lokalne przesunięcie (offset).
+  \item \texttt{priv\_roll\_deg}, \texttt{priv\_pitch\_deg}, \texttt{priv\_yaw\_deg} (double) – kąty rotacji w stopniach.
+  \item \texttt{priv\_rgb} (Vector3D) – kolor (R,G,B jako double, castowane na int przy wysyłce).
+\end{itemize}
+
+\textbf{Konstruktor:}
+\begin{itemize}
+  \item Lista inicjalizacyjna: \texttt{priv\_name("")}, kąty = 0.
+  \item W ciele: wypełnia tablice zerami (pozycja, shift) lub domyślnymi wartościami (skala=1, rgb=128).
+\end{itemize}
+
+\textbf{Metody Get/Set:} Proste zwracanie i ustawianie pól. Override z AbstractMobileObj.
+
+\textbf{Pytania:}
+\begin{itemize}
+  \item \textit{Dlaczego priv\_ ?} Konwencja – pole prywatne. Łatwiej odróżnić od parametrów metod.
+  \item \textit{Czemu Roll/Pitch/Yaw osobno a nie jeden Vector3D?} Bo interface AbstractMobileObj wymaga osobnych metod.
+  \item \textit{Co to shift?} Lokalne przesunięcie – np. oś obrotu nie w środku bryły, tylko gdzieś indziej.
+\end{itemize}
+
+\subsubsection{Scene.hh i Scene.cpp}
+\textbf{Co to jest:} Kontener na wszystkie obiekty w scenie.
+
+\textbf{Pole:}
+\begin{itemize}
+  \item \texttt{\_objects} – \texttt{map<string, AbstractMobileObj*>}. Klucz = nazwa, wartość = wskaźnik na obiekt.
+\end{itemize}
+
+\textbf{Metody:}
+\begin{itemize}
+  \item \texttt{FindMobileObj(const char* sName)} – szuka w mapie, zwraca wskaźnik lub nullptr.
+  \item \texttt{AddMobileObj(AbstractMobileObj* pMobObj)} – dodaje do mapy pod kluczem \texttt{pMobObj->GetName()}.
+  \item Destruktor – iteruje po mapie i wywołuje \texttt{delete} dla każdego obiektu (żeby nie było wycieku).
+\end{itemize}
+
+\textbf{Pytania:}
+\begin{itemize}
+  \item \textit{Dlaczego mapa a nie wektor?} Szybsze wyszukiwanie po nazwie (log N vs liniowe).
+  \item \textit{Co jeśli dodamy dwa obiekty o tej samej nazwie?} Drugi nadpisze pierwszy w mapie – stary obiekt zostanie w pamięci (wyciek). Można dodać sprawdzenie i delete starego.
+  \item \textit{Kto usuwa obiekty?} Destruktor Scene – dlatego new w main\_etap2, a delete w ~Scene.
+\end{itemize}
+
+\subsection{Komunikacja sieciowa}
+
+\subsubsection{ComChannel.hh i ComChannel.cpp}
+\textbf{Co to jest:} Gniazdo TCP do serwera graficznego.
+
+\textbf{Pola:}
+\begin{itemize}
+  \item \texttt{\_socket} (int) – deskryptor gniazda (liczba od systemu).
+  \item \texttt{\_mutex} (std::mutex) – blokada dostępu (gdyby wiele wątków).
+\end{itemize}
+
+\textbf{Metody:}
+\begin{itemize}
+  \item \texttt{Connect(host, port)} – tworzy socket, ustawia adres, wywołuje connect(). Zwraca true jeśli OK.
+  \item \texttt{Send(string)} – doklejamy "{\textbackslash}n" na końcu i send() przez socket. Zwraca true jeśli wysłano.
+  \item \texttt{Close()} – wysyła "Close", potem close(socket).
+\end{itemize}
+
+\textbf{Kroki w Connect:}
+\begin{enumerate}
+  \item \texttt{socket(AF\_INET, SOCK\_STREAM, 0)} – tworzy gniazdo TCP/IPv4.
+  \item \texttt{sockaddr\_in} – struktura z rodziną (AF\_INET), portem (htons), adresem IP (inet\_pton).
+  \item \texttt{connect(socket, addr, len)} – próba połączenia. Jeśli <0 to błąd.
+\end{enumerate}
+
+\textbf{Pytania:}
+\begin{itemize}
+  \item \textit{Co to AF\_INET?} IPv4. Dla IPv6 byłoby AF\_INET6.
+  \item \textit{Co to SOCK\_STREAM?} TCP (strumieniowy, niezawodny). Dla UDP byłoby SOCK\_DGRAM.
+  \item \textit{Czemu htons?} Konwersja portu na network byte order (big-endian).
+  \item \textit{Co jeśli serwer nie odpowiada?} connect zwróci błąd, Connect zwraca false.
+  \item \textit{Dlaczego mutex?} Gdyby wiele wątków chciało wysyłać równocześnie – ochrona przed konfliktami.
+\end{itemize}
+
+\subsection{Parser XML}
+
+\subsubsection{XMLReader.hh i XMLReader.cpp}
+\textbf{Co to jest:} Prosty parser atrybutów z pliku XML.
+
+\textbf{Struktura XMLCube:}
+\begin{itemize}
+  \item \texttt{name} (string) – nazwa obiektu.
+  \item \texttt{shift[3]}, \texttt{scale[3]}, \texttt{rot[3]}, \texttt{trans[3]} (double) – trzy liczby dla każdego.
+  \item \texttt{rgb[3]} (int) – kolor.
+\end{itemize}
+
+\textbf{Pola klasy XMLReader:}
+\begin{itemize}
+  \item \texttt{plugins} – wektor nazw bibliotek (lista stringów).
+  \item \texttt{cubes} – wektor struktur XMLCube (lista obiektów).
+\end{itemize}
+
+\textbf{Metoda ReadFile:}
+\begin{enumerate}
+  \item Otwiera plik, czyta linia po linii (\texttt{getline}).
+  \item Flagi \texttt{inPlugins}, \texttt{inObjects} – czy jesteśmy w sekcji <Plugins> czy <Objects>.
+  \item Jak znajdzie <Lib...> w sekcji Plugins:
+    \begin{itemize}
+      \item \texttt{GetAttributeValue(line, "Name")} – wyciąga wartość Name="..." (string między cudzysłowami).
+      \item Dodaje do \texttt{plugins.push\_back(name)}.
+    \end{itemize}
+  \item Jak znajdzie <Cube...> w Objects:
+    \begin{itemize}
+      \item Tworzy lokalny \texttt{XMLCube cube}.
+      \item Dla każdego atrybutu (Shift, Scale, RotXYZ\_deg, Trans\_m, RGB):
+      \item \texttt{GetAttributeValue(line, attr)} – pobiera string wartości.
+      \item \texttt{ParseVector3(string, cube.scale)} – parsuje trzy liczby rozdzielone spacjami do tablicy.
+      \item Jeśli brakuje atrybutu: domyślne wartości (0 lub 1 lub 128).
+      \item \texttt{cubes.push\_back(cube)}.
+    \end{itemize}
+\end{enumerate}
+
+\textbf{Metoda GetAttributeValue:}
+\begin{itemize}
+  \item Szuka w linii tekstu \texttt{AttrName="}.
+  \item Jeśli znajdzie: przeskakuje długość nazwy + 2 znaki (za cudzysłów).
+  \item Szuka następnego cudzysłowu.
+  \item Zwraca substring między nimi.
+\end{itemize}
+
+\textbf{Metoda ParseVector3:}
+\begin{itemize}
+  \item \texttt{istringstream iss(str)} – tworzy strumień z tekstu.
+  \item \texttt{iss >> out[0] >> out[1] >> out[2]} – czyta trzy liczby.
+\end{itemize}
+
+\textbf{Pytania:}
+\begin{itemize}
+  \item \textit{Dlaczego nie Xerces-C++ albo inna biblioteka?} Bo to prosty parser – wystarczy. Mniej zależności.
+  \item \textit{Co jeśli XML ma złą składnię?} Parser nic nie znajdzie lub dostanie puste wartości – da domyślne.
+  \item \textit{Jak dodać nowy atrybut?} Dodaj pole w XMLCube, wywołanie GetAttributeValue i ParseVector.
+  \item \textit{Czy obsługuje zagnieżdżone tagi?} Nie – tylko jednoliniowe <Cube .../>.
+\end{itemize}
+
+\subsubsection{config.xml}
+\textbf{Co to jest:} Plik konfiguracyjny z listą pluginów i obiektów.
+
+\textbf{Struktura:}
+\begin{itemize}
+  \item Sekcja <Plugins>: Lista <Lib Name="..."/> – nazwy bibliotek do załadowania (nie używane w Etap 2, ale gotowe na przyszłość).
+  \item Sekcja <Objects>: Lista <Cube Name="..." Shift="..." Scale="..." RotXYZ\_deg="..." Trans\_m="..." RGB="..."/> – opis każdego prostopadłościanu.
+\end{itemize}
+
+\textbf{Przykład:}
+\begin{verbatim}
+<Cube Name="Podstawa" 
+      Shift="0 -0.5 0" 
+      Scale="0.7 0.7 0.2" 
+      RotXYZ_deg="0 0 0" 
+      Trans_m="0 0 0" 
+      RGB="0 0 255"/>
+\end{verbatim}
+Znaczenie:
+\begin{itemize}
+  \item Name: "Podstawa".
+  \item Shift: przesunięcie w dół o 0.5 (y=-0.5).
+  \item Scale: płaski kształt (wysokość 0.2, szerokość 0.7).
+  \item RotXYZ\_deg: brak rotacji.
+  \item Trans\_m: środek w (0,0,0).
+  \item RGB: niebieski (0,0,255).
+\end{itemize}
+
+\textbf{Pytania:}
+\begin{itemize}
+  \item \textit{Jak dodać nowy obiekt?} Dopisz kolejną linię <Cube .../> z unikalnąnazwą.
+  \item \textit{Co jeśli nie wpiszę RGB?} XMLReader da domyślne (128,128,128) – szary.
+  \item \textit{Jak serwer wie jaki kształt?} Z Scale i Shift – serwer rysuje prostopadłościan o podanych wymiarach.
+\end{itemize}
+
+\section{Potencjalne pytania prowadzącego i odpowiedzi}
+
+\subsection{Ogólne}
+\begin{itemize}
+  \item \textit{Jak działa cały program?} XML → parser → obiekty Cuboid → scena → wysyłka AddObj → serwer rysuje. Komendy z pliku → preprocesor → pluginy → zmiany obiektów → UpdateObj.
+  \item \textit{Gdzie są definicje interfejsów?} W plikach Abstract*.hh (dostarczone przez prowadzącego).
+  \item \textit{Co to polimorfizm tutaj?} Wskaźnik AbstractMobileObj* może wskazywać na Cuboid – wywołania metod wirtualnych działają poprawnie.
+  \item \textit{Dlaczego dynamic\_cast?} Bo musimy dostać konkretny typ (Cuboid) żeby wywołać GetScale itd.
+  \item \textit{Jak dodać nową komendę?} Napisz klasę Interp4Foo, zbuduj libInterp4Foo.so, dodaj wpis w mapie cmdMap.
+\end{itemize}
+
+\subsection{Pluginy}
+\begin{itemize}
+  \item \textit{Dlaczego dlopen a nie link statyczny?} Bo możemy dodać nową komendę bez rekompilacji głównego programu.
+  \item \textit{Co to RTLD\_LAZY?} Leniwe wiązanie funkcji (resolve przy pierwszym użyciu).
+  \item \textit{Jak dlsym wie jaką nazwę szukać?} Bo extern "C" – brak manglingu.
+  \item \textit{Co jeśli biblioteka nie istnieje?} dlopen zwraca NULL, sprawdzamy i wypisujemy błąd.
+\end{itemize}
+
+\subsection{XML i Parser}
+\begin{itemize}
+  \item \textit{Dlaczego nie pełny parser XML?} Bo wystarczy prosty – mamy tylko atrybuty w jednej linii.
+  \item \textit{Co jeśli XML ma komentarze?} Nie obsługiwane – linie z < bez Cube/Lib będą pominięte.
+  \item \textit{Jak parsować wektor?} istringstream i operator>>.
+\end{itemize}
+
+\subsection{Sieć}
+\begin{itemize}
+  \item \textit{Dlaczego TCP a nie UDP?} Bo TCP gwarantuje dostarczenie w kolejności – ważne dla komend graficznych.
+  \item \textit{Co to socket?} Deskryptor (liczba) reprezentujący połączenie sieciowe.
+  \item \textit{Jak zamykamy połączenie?} close(socket) po wysłaniu "Close".
+\end{itemize}
+
+\subsection{Scena}
+\begin{itemize}
+  \item \textit{Dlaczego mapa?} Szybkie wyszukiwanie po nazwie.
+  \item \textit{Kto zwalnia pamięć?} Destruktor Scene – delete dla każdego obiektu.
+  \item \textit{Co jeśli nazwa się powtórzy?} Drugi obiekt nadpisze pierwszy w mapie (można dodać sprawdzanie).
+\end{itemize}
+
+\subsection{Cuboid}
+\begin{itemize}
+  \item \textit{Dlaczego osobne pola na Roll/Pitch/Yaw?} Bo interface AbstractMobileObj ma osobne metody Get/Set.
+  \item \textit{Co to shift?} Lokalne przesunięcie – przydatne dla złożonych robotów (oś obrotu nie w środku).
+  \item \textit{Dlaczego Vector3D[0..2]?} Bo ten typ nie ma konstruktora – musimy wypełniać indeksami.
+\end{itemize}
+
+\section{Podsumowanie}
+Program łączy kilka prostych klocków: \textbf{preprocesor}, \textbf{pluginy}, \textbf{mapy}, \textbf{XML}, \textbf{gniazdo TCP}. Każdy klocek robi jedną rzecz. Razem dają możliwość łatwego dodawania komend i obiektów oraz wizualizacji. Najważniejsze: nazwa komendy (tekst) → mapa → fabryka pluginu → obiekt komendy. Obiekt sceny (nazwa) → mapa → szybka aktualizacja i wysyłka do serwera.
+
+\end{document}

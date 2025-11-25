@@ -1,5 +1,5 @@
-__start__: obj __lines_for_space__ interp __plugin__
-	export LD_LIBRARY_PATH="./libs"; ./interp
+__start__: etap2
+	export LD_LIBRARY_PATH="./libs"; ./interp_etap2
 
 etap2: obj interp_etap2 __plugin__
 	@echo "Uruchom serwer graficzny, a potem:"
@@ -23,6 +23,15 @@ __plugin__:
 CPPFLAGS=-Wall -pedantic -std=c++17 -Iinc
 LDFLAGS=-Wall
 
+# Build mode (DEBUG=1 for -g -O0, else -O2)
+DEBUG ?= 1
+ifeq ($(DEBUG),1)
+CPPFLAGS += -g -O0 -DDEBUG
+LDFLAGS  += -g
+else
+CPPFLAGS += -O2 -DNDEBUG
+endif
+
 
 
 
@@ -45,17 +54,29 @@ obj/ComChannel.o: src/ComChannel.cpp inc/ComChannel.hh inc/AbstractComChannel.hh
 obj/XMLReader.o: src/XMLReader.cpp inc/XMLReader.hh
 	g++ -c ${CPPFLAGS} -o obj/XMLReader.o src/XMLReader.cpp
 
-interp_etap2: obj/main_etap2.o obj/Cuboid.o obj/Scene.o obj/ComChannel.o obj/XMLReader.o
-	g++ ${LDFLAGS} -o interp_etap2 obj/main_etap2.o obj/Cuboid.o obj/Scene.o obj/ComChannel.o obj/XMLReader.o
+interp_etap2: obj/main_etap2.o obj/Cuboid.o obj/Scene.o obj/ComChannel.o obj/XMLReader.o obj/CommandInterpreter.o
+	g++ ${LDFLAGS} -rdynamic -o interp_etap2 obj/main_etap2.o obj/Cuboid.o obj/Scene.o obj/ComChannel.o obj/XMLReader.o obj/CommandInterpreter.o -ldl
 
-obj/main_etap2.o: src/main_etap2.cpp inc/Scene.hh inc/Cuboid.hh inc/ComChannel.hh inc/XMLReader.hh
+.PHONY: debug release
+debug:
+	$(MAKE) clean
+	$(MAKE) etap2 DEBUG=1
+
+release:
+	$(MAKE) clean
+	$(MAKE) etap2 DEBUG=0
+
+obj/main_etap2.o: src/main_etap2.cpp inc/Scene.hh inc/Cuboid.hh inc/ComChannel.hh inc/XMLReader.hh inc/CommandInterpreter.hh
 	g++ -c ${CPPFLAGS} -o obj/main_etap2.o src/main_etap2.cpp
+
+obj/CommandInterpreter.o: src/CommandInterpreter.cpp inc/CommandInterpreter.hh inc/AbstractInterp4Command.hh inc/AbstractScene.hh inc/AbstractComChannel.hh
+	g++ -c ${CPPFLAGS} -o obj/CommandInterpreter.o src/CommandInterpreter.cpp
 
 doc:
 	cd dox; make
 
 clean:
-	rm -f obj/* interp core*
+	rm -f obj/* interp interp_etap2 core*
 
 
 clean_plugin:

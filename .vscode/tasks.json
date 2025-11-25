@@ -1,0 +1,21 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build Etap2 (debug)",
+      "type": "shell",
+      "command": "make",
+      "args": ["etap2", "DEBUG=1"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": ["$gcc"],
+      "group": { "kind": "build", "isDefault": true }
+    },
+    {
+      "label": "Run Server",
+      "type": "shell",
+      "command": "cd files/serwer-bez-tla-Qt6-cmake/build && ./serwer_graficzny",
+      "isBackground": true,
+      "problemMatcher": []
+    }
+  ]
+}

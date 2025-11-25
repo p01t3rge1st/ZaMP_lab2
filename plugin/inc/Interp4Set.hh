@@ -10,8 +10,8 @@
 
 class Interp4Set: public AbstractInterp4Command {
 
-  char _Axis;
-  double _Angle_deg;
+  double _Trans_x, _Trans_y, _Trans_z;
+  double _Roll_deg, _Pitch_deg, _Yaw_deg;
 
   public:
     Interp4Set();
